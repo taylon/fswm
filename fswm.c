@@ -1,97 +1,119 @@
-#include <X11/X.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
 
-#include <X11/Xlib.h>
+#include <xcb/xcb.h>
 
-static Display *display;
-static Window rootWindow;
+static xcb_connection_t *conn;
+static uint16_t screen_w;
+static uint16_t screen_h;
+
+void grab_mouse_buttons(xcb_window_t *window) {
+  xcb_grab_button(conn, 0, *window,
+                  XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE,
+                  XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC, *window, XCB_NONE,
+                  1 /* left  button */, XCB_MOD_MASK_1);
+
+  xcb_grab_button(conn, 0, *window,
+                  XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE,
+                  XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC, *window, XCB_NONE,
+                  2 /* middle  button */, XCB_MOD_MASK_1);
+
+  xcb_grab_button(conn, 0, *window,
+                  XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE,
+                  XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC, *window, XCB_NONE,
+                  3 /* right  button */, XCB_MOD_MASK_1);
+}
+
+// Substructure redirection is what is going to allow us to
+// receive the messages we need from X to become a Window Manager
+void setup_substructure_redirection(xcb_window_t *root_window) {
+  unsigned int mask[1] = {XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY | // destroy notify
+                          XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT}; // map request
+
+  xcb_void_cookie_t cookie = xcb_change_window_attributes_checked(
+      conn, *root_window, XCB_CW_EVENT_MASK, mask);
+
+  xcb_flush(conn);
+
+  xcb_generic_error_t *error = xcb_request_check(conn, cookie);
+  if (error != NULL) {
+    xcb_disconnect(conn);
+    free(error);
+
+    printf("unable to setup substructure redirection\n");
+    exit(EXIT_FAILURE);
+  }
+}
 
 void setup(void) {
-  if (!(display = XOpenDisplay(NULL)))
+  conn = xcb_connect(NULL, NULL);
+  if (xcb_connection_has_error(conn)) {
+    xcb_disconnect(conn);
+
+    printf("unable to initiate connection with X server\n");
     exit(EXIT_FAILURE);
+  }
 
-  rootWindow = DefaultRootWindow(display);
+  xcb_screen_t *screen = xcb_setup_roots_iterator(xcb_get_setup(conn)).data;
+  xcb_window_t *root_window = &screen->root;
 
-  XSelectInput(display, rootWindow,
-               SubstructureRedirectMask | SubstructureNotifyMask);
-  XSync(display, false);
+  screen_w = screen->width_in_pixels;
+  screen_h = screen->height_in_pixels;
+
+  grab_mouse_buttons(root_window);
+  setup_substructure_redirection(root_window);
 }
 
-void grab_keys(void) {
-  XGrabKey(display, XKeysymToKeycode(display, XStringToKeysym("Return")),
-           Mod1Mask, rootWindow, true, GrabModeAsync, GrabModeAsync);
+void map_request(xcb_generic_event_t *generic_event) {
+  printf("map request\n");
+
+  xcb_map_request_event_t *event = (xcb_map_request_event_t *)generic_event;
+
+  xcb_map_window(conn, event->window);
 }
 
-void grab_buttons(void) {
-  XGrabButton(display, 1, Mod1Mask, DefaultRootWindow(display), True,
-              ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-              GrabModeAsync, GrabModeAsync, None, None);
+#define XCB_CONFIG_MOVE XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
+#define XCB_CONFIG_RESIZE XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT
+#define XCB_CONFIG_MOVE_RESIZE XCB_CONFIG_RESIZE | XCB_CONFIG_MOVE
 
-  XGrabButton(display, 3, Mod1Mask, DefaultRootWindow(display), True,
-              ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-              GrabModeAsync, GrabModeAsync, None, None);
+void configure_request(xcb_generic_event_t *generic_event) {
+  printf("configure request\n");
+
+  xcb_configure_request_event_t *event =
+      (xcb_configure_request_event_t *)generic_event;
+
+  unsigned int values[4] = {0, 0, screen_w, screen_h};
+  xcb_configure_window(conn, event->window, XCB_CONFIG_MOVE_RESIZE, values);
 }
 
-void key_press(XEvent *event) {
-  printf("KeyPress event\n");
-
-  if (event->xkey.keycode ==
-      XKeysymToKeycode(display, XStringToKeysym("Return")))
-    system("gvim &");
-}
-
-void map_request(XEvent *event) {
-  printf("MapRequest event\n");
-
-  XMapRequestEvent *map_request_event = &event->xmaprequest;
-
-  XMapWindow(display, map_request_event->window);
-}
-
-void configure_request(XEvent *ev) {
-  printf("ConfigureRequest event\n");
-
-  XWindowChanges window_changes;
-  XConfigureRequestEvent *event = &ev->xconfigurerequest;
-
-  window_changes.x = event->x;
-  window_changes.y = event->y;
-  window_changes.width = event->width;
-  window_changes.height = event->height;
-  window_changes.border_width = event->border_width;
-  window_changes.sibling = event->above;
-  window_changes.stack_mode = event->detail;
-
-  XConfigureWindow(display, event->window, event->value_mask, &window_changes);
-}
-
-static void (*event_handlers[LASTEvent])(XEvent *) = {
-    [KeyPress] = key_press,
-    [ConfigureRequest] = configure_request,
-    [MapRequest] = map_request,
+static void (*event_handlers[XCB_NO_OPERATION])(xcb_generic_event_t *) = {
+    [XCB_CONFIGURE_REQUEST] = configure_request,
+    [XCB_MAP_REQUEST] = map_request,
 };
 
 void run(void) {
-  XEvent event;
+  xcb_generic_event_t *event;
 
-  XSync(display, False);
+  for (;;) {
+    if (xcb_connection_has_error(conn)) {
+      exit(EXIT_FAILURE);
+    }
 
-  while (!XNextEvent(display, &event)) {
-    printf("Event: %i\n", event.type);
+    if ((event = xcb_wait_for_event(conn)))
+      if (event_handlers[event->response_type & ~0x80]) {
+        event_handlers[event->response_type & ~0x80](event);
+        xcb_flush(conn);
+      }
 
-    if (event_handlers[event.type])
-      event_handlers[event.type](&event);
+    free(event);
   }
 }
 
 int main(void) {
   setup();
 
-  grab_keys();
-  grab_buttons();
-
   printf("Running!\n");
   run();
 }
+
