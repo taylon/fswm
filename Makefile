@@ -13,5 +13,8 @@ clean:
 
 run: 
 	@DISPLAY=:1 ./fswm
+
+test: fswm
+	@./test.sh
 	
 .PHONY: clean

@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include <xcb/xcb.h>
+#include <xcb/xcb_event.h>
 
 static xcb_connection_t *conn;
 static uint16_t screen_w;
@@ -66,7 +67,7 @@ void setup(void) {
 }
 
 void map_request(xcb_generic_event_t *generic_event) {
-  printf("map request\n");
+  printf("MapRequest\n");
 
   xcb_map_request_event_t *event = (xcb_map_request_event_t *)generic_event;
 
@@ -78,7 +79,7 @@ void map_request(xcb_generic_event_t *generic_event) {
 #define XCB_CONFIG_MOVE_RESIZE XCB_CONFIG_RESIZE | XCB_CONFIG_MOVE
 
 void configure_request(xcb_generic_event_t *generic_event) {
-  printf("configure request\n");
+  printf("ConfigureRequest\n");
 
   xcb_configure_request_event_t *event =
       (xcb_configure_request_event_t *)generic_event;
@@ -100,11 +101,17 @@ void run(void) {
       exit(EXIT_FAILURE);
     }
 
-    if ((event = xcb_wait_for_event(conn)))
-      if (event_handlers[event->response_type & ~0x80]) {
-        event_handlers[event->response_type & ~0x80](event);
+    if ((event = xcb_wait_for_event(conn))) {
+      uint8_t event_response_type = XCB_EVENT_RESPONSE_TYPE(event);
+
+      if (event_handlers[event_response_type]) {
+        event_handlers[event_response_type](event);
+
         xcb_flush(conn);
+      } else {
+        printf("Unknown event: %i\n", event_response_type);
       }
+    }
 
     free(event);
   }
@@ -113,7 +120,6 @@ void run(void) {
 int main(void) {
   setup();
 
-  printf("Running!\n");
+  printf("Running fswm!\n");
   run();
 }
-
